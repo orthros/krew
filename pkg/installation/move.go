@@ -41,11 +41,11 @@ func findMoveTargets(fromDir, toDir string, fo index.FileOperation) ([]move, err
 		return nil, fmt.Errorf("could not get the relative path for the move src, err: %v", err)
 	}
 
-	glog.V(4).Infof("Trying to move single file directly from=%q to=%q with file operation=%+v", fromDir, toDir, fo)
+	glog.V(4).Infof("Trying to move single file directly from=%q to=%q with file operation=%#v", fromDir, toDir, fo)
 	if m, ok, err := getDirectMove(fromDir, toDir, fo); err != nil {
 		return nil, fmt.Errorf("failed to detect single move operation, err: %v", err)
 	} else if ok {
-		glog.V(3).Infof("Detected single move from file operation=%+v", fo)
+		glog.V(3).Infof("Detected single move from file operation=%#v", fo)
 		return []move{m}, nil
 	}
 
@@ -58,6 +58,9 @@ func findMoveTargets(fromDir, toDir string, fo index.FileOperation) ([]move, err
 	gl, err := filepath.Glob(filepath.Join(filepath.FromSlash(fromDir), filepath.FromSlash(fo.From)))
 	if err != nil {
 		return nil, fmt.Errorf("could not get files using a glob string, err: %v", err)
+	}
+	if len(gl) == 0 {
+		return nil, fmt.Errorf("no files in the plugin archive matched the glob pattern=%s", fo.From)
 	}
 
 	var moves []move
@@ -119,7 +122,7 @@ func isMoveAllowed(fromBase, toBase string, m move) bool {
 }
 
 func moveFiles(fromDir, toDir string, fo index.FileOperation) error {
-	glog.V(4).Infof("Finding move targets from %q to %q with file operation=%v", fromDir, toDir, fo)
+	glog.V(4).Infof("Finding move targets from %q to %q with file operation=%#v", fromDir, toDir, fo)
 	moves, err := findMoveTargets(fromDir, toDir, fo)
 	if err != nil {
 		return fmt.Errorf("could not find move targets, err: %v", err)
@@ -135,6 +138,7 @@ func moveFiles(fromDir, toDir string, fo index.FileOperation) error {
 			return fmt.Errorf("could not rename file from %q to %q, err: %v", m.from, m.to, err)
 		}
 	}
+	glog.V(4).Infoln("Move operations are complete")
 	return nil
 }
 
@@ -147,44 +151,50 @@ func moveAllFiles(fromDir, toDir string, fos []index.FileOperation) error {
 	return nil
 }
 
-func moveToInstallAtomic(download, pluginDir, version string, fos []index.FileOperation) error {
+func moveToInstallDir(download, pluginDir, version string, fos []index.FileOperation) (string, error) {
 	glog.V(4).Infof("Creating plugin dir %q", pluginDir)
 	if err := os.MkdirAll(pluginDir, 0755); err != nil {
-		return fmt.Errorf("error creating path to %q, err: %v", pluginDir, err)
+		return "", fmt.Errorf("error creating path to %q, err: %v", pluginDir, err)
 	}
 
 	tempdir, err := ioutil.TempDir("", "krew-temp-move")
 	glog.V(4).Infof("Creating temp plugin move operations dir %q", tempdir)
 	if err != nil {
-		return fmt.Errorf("failed to find a temporary director, err: %v", err)
+		return "", fmt.Errorf("failed to find a temporary director, err: %v", err)
 	}
 	defer os.RemoveAll(tempdir)
 
 	if err = moveAllFiles(download, tempdir, fos); err != nil {
-		return fmt.Errorf("failed to move files, err: %v", err)
-	}
-	// TODO(lbb): determine if this should be moved into moveAllFiles
-	glog.V(4).Infof("Checking for plugin descriptor in new plugin dir")
-	if ok, err := containsPluginDescriptors(tempdir); err != nil {
-		return fmt.Errorf("failed to find plugin descriptors in path %q, err %v", tempdir, err)
-	} else if !ok {
-		return fmt.Errorf("the resulting plugin dir has to contain a plugin.yaml file")
+		return "", fmt.Errorf("failed to move files, err: %v", err)
 	}
 
 	installPath := filepath.Join(pluginDir, version)
-	glog.V(2).Infof("Move %q to %q", tempdir, installPath)
-	if err = moveOrCopy(tempdir, installPath); err != nil {
+	glog.V(2).Infof("Move directory %q to %q", tempdir, installPath)
+	if err = moveOrCopyDir(tempdir, installPath); err != nil {
 		defer os.Remove(installPath)
-		return fmt.Errorf("could not rename file from %q to %q, err: %v", tempdir, installPath, err)
+		return "", fmt.Errorf("could not rename file from %q to %q, err: %v", tempdir, installPath, err)
 	}
 
-	return nil
+	return installPath, nil
 }
 
-// moveOrCopy will try to rename a dir or file. If rename is not supported a manual copy will be performed.
-func moveOrCopy(from, to string) error {
+// moveOrCopyDir will try to rename a dir or file. If rename is not supported a
+// manual copy will be performed. Existing files at "to" will be deleted
+func moveOrCopyDir(from, to string) error {
 	// Try atomic rename (does not work cross partition).
-	err := os.Rename(from, to)
+	fi, err := os.Stat(to)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("error checking move target dir %q: %+v", to, err)
+	}
+	if fi != nil && fi.IsDir() {
+		glog.V(4).Infof("There's already a directory at move target %q. deleting.", to)
+		if err := os.RemoveAll(to); err != nil {
+			return fmt.Errorf("error cleaning up dir %q: %+v", to, err)
+		}
+		glog.V(4).Infof("Move target directory %q cleaned up", to)
+	}
+
+	err = os.Rename(from, to)
 	// Fallback for invalid cross-device link (errno:18).
 	if le, ok := err.(*os.LinkError); err != nil && ok {
 		if errno, ok := le.Err.(syscall.Errno); ok && errno == 18 {

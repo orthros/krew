@@ -28,8 +28,10 @@ import (
 	"github.com/spf13/viper"
 )
 
-var paths environment.KrewPaths
-var krewExecutedVersion string
+var (
+	paths               environment.Paths // krew paths used by the process
+	krewExecutedVersion string            // resolved version of krew
+)
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -37,9 +39,8 @@ var rootCmd = &cobra.Command{
 	Short: "krew is the kubectl plugin manager",
 	Long: `krew is the kubectl plugin manager.
 You can invoke krew through kubectl with: "kubectl plugin [krew] option..."`,
-	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
-		bindEnvironmentVariables(viper.GetViper(), cmd)
-	},
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -50,11 +51,6 @@ func Execute() {
 	}
 }
 
-// InjectCommand InjectCommand adds a cobra command to the main tree
-func InjectCommand(c *cobra.Command) {
-	rootCmd.AddCommand(c)
-}
-
 func init() {
 	cobra.OnInitialize(initConfig)
 	// Set glog default to stderr
@@ -63,16 +59,21 @@ func init() {
 	flag.Parse()
 
 	paths = environment.MustGetKrewPaths()
-	if err := ensureDirs(paths.Base, paths.Download, paths.Install, paths.Bin); err != nil {
+	if err := ensureDirs(paths.BasePath(),
+		paths.DownloadPath(),
+		paths.InstallPath(),
+		paths.BinPath()); err != nil {
 		glog.Fatal(err)
 	}
 
-	if environment.IsPlugin(os.Environ()) {
-		if krewVersion, ok, err := environment.GetExecutedVersion(paths, os.Args); err != nil {
-			glog.Fatal(fmt.Errorf("failed to find current krew version, err: %v", err))
-		} else if ok {
-			krewExecutedVersion = krewVersion
-		}
+	selfPath, err := os.Executable()
+	if err != nil {
+		glog.Errorf("failed to get the own executable path")
+	}
+	if krewVersion, ok, err := environment.GetExecutedVersion(paths.InstallPath(), selfPath, environment.Realpath); err != nil {
+		glog.Fatal(fmt.Errorf("failed to find current krew version, err: %v", err))
+	} else if ok {
+		krewExecutedVersion = krewVersion
 	}
 
 	SetGlogFlags(krewExecutedVersion != "")
@@ -88,7 +89,7 @@ func SetGlogFlags(hidden bool) {
 }
 
 func checkIndex(_ *cobra.Command, _ []string) error {
-	if ok, err := gitutil.IsGitCloned(paths.Index); err != nil {
+	if ok, err := gitutil.IsGitCloned(paths.IndexPath()); err != nil {
 		return err
 	} else if !ok {
 		return fmt.Errorf("krew local plugin index is not initialized (run \"krew update\")")

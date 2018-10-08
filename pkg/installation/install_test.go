@@ -15,6 +15,8 @@
 package installation
 
 import (
+	"io/ioutil"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -65,5 +67,133 @@ func Test_moveTargets(t *testing.T) {
 				t.Errorf("moveTargets() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func Test_createOrUpdateLink(t *testing.T) {
+	tempDir, err := ioutil.TempDir(os.TempDir(), "krew-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	type args struct {
+		binDir string
+		binary string
+	}
+	tests := []struct {
+		name       string
+		pluginName string
+		args       args
+		wantErr    bool
+	}{
+		{
+			name:       "normal link",
+			pluginName: "foo",
+			args: args{
+				binDir: tempDir,
+				binary: filepath.Join(testdataPath(t), "plugin-foo", "kubectl-foo"),
+			},
+			wantErr: false,
+		},
+		{
+			name:       "update link",
+			pluginName: "foo",
+			args: args{
+				binDir: tempDir,
+				binary: filepath.Join(testdataPath(t), "plugin-foo", "kubectl-foo"),
+			},
+			wantErr: false,
+		},
+		{
+			name:       "wrong path link",
+			pluginName: "foo",
+			args: args{
+				binDir: tempDir,
+				binary: filepath.Join(testdataPath(t), "plugin-foo", "foo", "not-exist"),
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := createOrUpdateLink(tt.args.binDir, tt.args.binary, tt.pluginName); (err != nil) != tt.wantErr {
+				t.Errorf("createOrUpdateLink() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func Test_pluginNameToBin(t *testing.T) {
+	tests := []struct {
+		name      string
+		isWindows bool
+		want      string
+	}{
+		{"foo", false, "kubectl-foo"},
+		{"foo-bar", false, "kubectl-foo_bar"},
+		{"foo", true, "kubectl-foo.exe"},
+		{"foo-bar", true, "kubectl-foo_bar.exe"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pluginNameToBin(tt.name, tt.isWindows); got != tt.want {
+				t.Errorf("pluginNameToBin(%v, %v) = %v; want %v", tt.name, tt.isWindows, got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_removeLink_notExists(t *testing.T) {
+	if err := removeLink("/non/existing/path"); err != nil {
+		t.Fatalf("removeLink failed with non-existing path: %+v", err)
+	}
+}
+
+func Test_removeLink_linkExists(t *testing.T) {
+	dir, err := ioutil.TempDir("", "removelink-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	link := filepath.Join(dir, "some-symlink")
+	if err := os.Symlink(os.TempDir(), link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeLink(link); err != nil {
+		t.Fatalf("removeLink(%s) failed: %+v", link, err)
+	}
+}
+
+func Test_removeLink_fails(t *testing.T) {
+	// create an unreadable directory and trigger "permission denied" error
+	dir, err := ioutil.TempDir("", "removelink-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	unreadableDir := filepath.Join(dir, "unreadable")
+	if err := os.MkdirAll(unreadableDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	unreadableFile := filepath.Join(unreadableDir, "mysterious-file")
+
+	if err := removeLink(unreadableFile); err == nil {
+		t.Fatalf("removeLink(%s) with unreadable file returned err==nil", unreadableFile)
+	}
+}
+
+func Test_removeLink_regularFileExists(t *testing.T) {
+	f, err := ioutil.TempFile("", "some-regular-file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := f.Name()
+	f.Close()
+	defer os.Remove(path)
+
+	if err := removeLink(path); err == nil {
+		t.Fatalf("removeLink(%s) with regular file was expected to fail; got: err=nil", path)
 	}
 }

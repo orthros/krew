@@ -15,100 +15,65 @@
 package environment
 
 import (
+	"io/ioutil"
+	"os"
 	"path/filepath"
-	"reflect"
+	"strings"
 	"testing"
+
+	"k8s.io/client-go/util/homedir"
 )
 
-func Test_parseEnvs(t *testing.T) {
-	type args struct {
-		environ []string
-	}
-	tests := []struct {
-		name string
-		args args
-		want map[string]string
-	}{
-		{
-			name: "normalParseEnvs",
-			args: args{
-				environ: []string{"TERM=A", "CC=en"},
-			},
-			want: map[string]string{
-				"TERM": "A",
-				"CC":   "en",
-			},
-		}, {
-			name: "normalParseEnvs",
-			args: args{
-				environ: []string{"TERM="},
-			},
-			want: map[string]string{
-				"TERM": "",
-			},
-		}, {
-			name: "normalParseEnvs",
-			args: args{
-				environ: []string{"FOO=A=B"},
-			},
-			want: map[string]string{
-				"FOO": "A=B",
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := parseEnvs(tt.args.environ); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("parseEnvs() = %v, want %v", got, tt.want)
-			}
-		})
+func TestMustGetKrewPaths_resolvesToHomeDir(t *testing.T) {
+	home := homedir.HomeDir()
+	expectedBase := filepath.Join(home, ".krew")
+	p := MustGetKrewPaths()
+	if got := p.BasePath(); got != expectedBase {
+		t.Fatalf("MustGetKrewPaths()=%s; expected=%s", got, expectedBase)
 	}
 }
 
-func TestIsPlugin(t *testing.T) {
-	type args struct {
-		environ []string
+func TestMustGetKrewPaths_envOverride(t *testing.T) {
+	custom := filepath.FromSlash("/custom/krew/path")
+	os.Setenv("KREW_ROOT", custom)
+	defer os.Unsetenv("KREW_ROOT")
+
+	p := MustGetKrewPaths()
+	if expected, got := custom, p.BasePath(); got != expected {
+		t.Fatalf("MustGetKrewPaths()=%s; expected=%s", got, expected)
 	}
-	tests := []struct {
-		name string
-		args args
-		want bool
-	}{
-		{
-			name: "is plugin",
-			args: args{
-				environ: []string{"KUBECTL_PLUGINS_DESCRIPTOR_NAME=abc"},
-			},
-			want: true,
-		},
-		{
-			name: "is set empty plugin name",
-			args: args{
-				environ: []string{"KUBECTL_PLUGINS_DESCRIPTOR_NAME="},
-			},
-			want: true,
-		},
-		{
-			name: "isnt plugin",
-			args: args{
-				environ: []string{"XXXXXXXX=abc"},
-			},
-			want: false,
-		},
+}
+
+func TestPaths(t *testing.T) {
+	base := filepath.FromSlash("/foo")
+	p := newPaths(base)
+	if got := p.BasePath(); got != base {
+		t.Fatalf("BasePath()=%s; expected=%s", got, base)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := IsPlugin(tt.args.environ); got != tt.want {
-				t.Errorf("IsPlugin() = %v, want %v", got, tt.want)
-			}
-		})
+	if got, expected := p.BinPath(), filepath.FromSlash("/foo/bin"); got != expected {
+		t.Fatalf("BinPath()=%s; expected=%s", got, expected)
+	}
+	if got, expected := p.IndexPath(), filepath.FromSlash("/foo/index"); got != expected {
+		t.Fatalf("IndexPath()=%s; expected=%s", got, expected)
+	}
+	if got, expected := p.InstallPath(), filepath.FromSlash("/foo/store"); got != expected {
+		t.Fatalf("InstallPath()=%s; expected=%s", got, expected)
+	}
+	if got, expected := p.PluginInstallPath("my-plugin"), filepath.FromSlash("/foo/store/my-plugin"); got != expected {
+		t.Fatalf("PluginInstallPath()=%s; expected=%s", got, expected)
+	}
+	if got, expected := p.PluginVersionInstallPath("my-plugin", "v1"), filepath.FromSlash("/foo/store/my-plugin/v1"); got != expected {
+		t.Fatalf("PluginVersionInstallPath()=%s; expected=%s", got, expected)
+	}
+	if got := p.DownloadPath(); !strings.HasSuffix(got, "krew-downloads") {
+		t.Fatalf("DownloadPath()=%s; expected suffix 'krew-downloads'", got)
 	}
 }
 
 func TestGetExecutedVersion(t *testing.T) {
 	type args struct {
-		paths   KrewPaths
-		cmdArgs []string
+		paths         Paths
+		executionPath string
 	}
 	tests := []struct {
 		name    string
@@ -120,13 +85,8 @@ func TestGetExecutedVersion(t *testing.T) {
 		{
 			name: "is in krew path",
 			args: args{
-				paths: KrewPaths{
-					Base:     filepath.FromSlash("/plugins/"),
-					Index:    filepath.FromSlash("/plugins/index"),
-					Install:  filepath.FromSlash("/plugins/store"),
-					Download: filepath.FromSlash("/plugins/download"),
-				},
-				cmdArgs: []string{filepath.FromSlash("/plugins/store/krew/deadbeef/krew.exe")},
+				paths:         newPaths(filepath.FromSlash("/plugins")),
+				executionPath: filepath.FromSlash("/plugins/store/krew/deadbeef/krew.exe"),
 			},
 			want:    "deadbeef",
 			inPath:  true,
@@ -135,28 +95,18 @@ func TestGetExecutedVersion(t *testing.T) {
 		{
 			name: "is not in krew path",
 			args: args{
-				paths: KrewPaths{
-					Base:     filepath.FromSlash("/plugins/"),
-					Index:    filepath.FromSlash("/plugins/index"),
-					Install:  filepath.FromSlash("/plugins/store"),
-					Download: filepath.FromSlash("/plugins/download"),
-				},
-				cmdArgs: []string{filepath.FromSlash("/plugins/store/NOTKREW/deadbeef/krew.exe")},
+				paths:         newPaths(filepath.FromSlash("/plugins")),
+				executionPath: filepath.FromSlash("/plugins/store/NOTKREW/deadbeef/krew.exe"),
 			},
 			want:    "",
 			inPath:  false,
 			wantErr: false,
 		},
 		{
-			name: "is in longer kreR path",
+			name: "is in longer krew path",
 			args: args{
-				paths: KrewPaths{
-					Base:     filepath.FromSlash("/plugins/"),
-					Index:    filepath.FromSlash("/plugins/index"),
-					Install:  filepath.FromSlash("/plugins/store"),
-					Download: filepath.FromSlash("/plugins/download"),
-				},
-				cmdArgs: []string{filepath.FromSlash("/plugins/store/krew/deadbeef/foo/krew.exe")},
+				paths:         newPaths(filepath.FromSlash("/plugins")),
+				executionPath: filepath.FromSlash("/plugins/store/krew/deadbeef/foo/krew.exe"),
 			},
 			want:    "deadbeef",
 			inPath:  true,
@@ -165,13 +115,8 @@ func TestGetExecutedVersion(t *testing.T) {
 		{
 			name: "is in smaller krew path",
 			args: args{
-				paths: KrewPaths{
-					Base:     filepath.FromSlash("/plugins/"),
-					Index:    filepath.FromSlash("/plugins/index"),
-					Install:  filepath.FromSlash("/plugins/store"),
-					Download: filepath.FromSlash("/plugins/download"),
-				},
-				cmdArgs: []string{filepath.FromSlash("/krew.exe")},
+				paths:         newPaths(filepath.FromSlash("/plugins")),
+				executionPath: filepath.FromSlash("/krew.exe"),
 			},
 			want:    "",
 			inPath:  false,
@@ -180,7 +125,10 @@ func TestGetExecutedVersion(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, got1, err := GetExecutedVersion(tt.args.paths, tt.args.cmdArgs)
+			t.Logf("installpath=%s", tt.args.paths.InstallPath())
+			got, isVersion, err := GetExecutedVersion(tt.args.paths.InstallPath(), tt.args.executionPath, func(s string) (string, error) {
+				return s, nil
+			})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GetExecutedVersion() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -188,8 +136,59 @@ func TestGetExecutedVersion(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("GetExecutedVersion() got = %v, want %v", got, tt.want)
 			}
-			if got1 != tt.inPath {
-				t.Errorf("GetExecutedVersion() got1 = %v, want %v", got1, tt.inPath)
+			if isVersion != tt.inPath {
+				t.Errorf("GetExecutedVersion() isVersion = %v, want %v", isVersion, tt.inPath)
+			}
+		})
+	}
+}
+
+func TestRealpath(t *testing.T) {
+	tmp, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmp)
+
+	// create regular file
+	if err := ioutil.WriteFile(filepath.Join(tmp, "regular-file"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// create absolute symlink
+	orig := filepath.Clean(os.TempDir())
+	if err := os.Symlink(orig, filepath.Join(tmp, "symbolic-link-abs")); err != nil {
+		t.Fatal(err)
+	}
+
+	// create relative symlink
+	if err := os.Symlink("./another-file", filepath.Join(tmp, "symbolic-link-rel")); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"file not exists", filepath.FromSlash("/not/exists"), "", true},
+		{"directory", tmp, tmp, false},
+		{"regular file", filepath.Join(tmp, "regular-file"), filepath.Join(tmp, "regular-file"), false},
+		{"directory unclean", filepath.Join(tmp, "foo", ".."), tmp, false},
+		{"regular file unclean", filepath.Join(tmp, "regular-file", "foo", ".."), filepath.Join(tmp, "regular-file"), false},
+		{"relative symbolic link", filepath.Join(tmp, "symbolic-link-rel"), "", true},
+		{"absolute symbolic link", filepath.Join(tmp, "symbolic-link-abs"), orig, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Realpath(tt.in)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Realpath(%s) error = %v, wantErr %v", tt.in, err, tt.wantErr)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("Realpath(%s) = %v, want %v", tt.in, got, tt.want)
 			}
 		})
 	}

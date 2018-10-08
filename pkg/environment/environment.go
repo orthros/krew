@@ -18,72 +18,91 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
+	"github.com/golang/glog"
 	"k8s.io/client-go/util/homedir"
 
 	"github.com/GoogleContainerTools/krew/pkg/pathutil"
 )
 
-// KrewPaths contains all important environment paths
-type KrewPaths struct {
-	// Base is the path of the krew root.
-	// The default path is ~/.kube/plugins/krew
-	Base string
-
-	// Index is a git(1) repository containing all local plugin manifests files.
-	// ${Index}/<plugin-name>.yaml
-	Index string
-
-	// Install is the dir where all plugins will be installed to.
-	// ${Install}/<version>/<plugin-content>
-	Install string
-
-	// Download is a directory where plugins will be temporarily downloaded to.
-	// This is currently a path in os.TempDir()
-	Download string
-
-	// Bin is the path krew links all plugin binaries to.
-	// This path has to be added to the $PATH.
-	Bin string
+// Paths contains all important environment paths
+type Paths struct {
+	base string
+	tmp  string
 }
 
-func parseEnvs(environ []string) map[string]string {
-	flags := make(map[string]string, len(environ))
-	for _, pair := range environ {
-		kv := strings.SplitN(pair, "=", 2)
-		flags[string(kv[0])] = kv[1]
+// MustGetKrewPaths returns the inferred paths for krew. By default, it assumes
+// $HOME/.krew as the base path, but can be overriden via KREW_ROOT environment
+// variable.
+func MustGetKrewPaths() Paths {
+	base := filepath.Join(homedir.HomeDir(), ".krew")
+	if fromEnv := os.Getenv("KREW_ROOT"); fromEnv != "" {
+		base = fromEnv
+		glog.V(4).Infof("using environment override KREW_ROOT=%s", fromEnv)
 	}
-	return flags
-}
-
-// MustGetKrewPaths returns ensured index paths for krew.
-func MustGetKrewPaths() KrewPaths {
-	base := filepath.Join(homedir.HomeDir(), ".kube", "plugins", "krew")
 	base, err := filepath.Abs(base)
 	if err != nil {
-		panic(fmt.Errorf("cannot get current pwd err: %v", err))
+		panic(fmt.Errorf("cannot get absolute path, err: %v", err))
 	}
+	return newPaths(base)
+}
 
-	return KrewPaths{
-		Base:     base,
-		Index:    filepath.Join(base, "index"),
-		Install:  filepath.Join(base, "store"),
-		Download: filepath.Join(os.TempDir(), "krew"),
-		Bin:      filepath.Join(base, "bin"),
-	}
+func newPaths(base string) Paths {
+	return Paths{base: base, tmp: os.TempDir()}
+}
+
+// BasePath returns krew base directory.
+func (p Paths) BasePath() string { return p.base }
+
+// IndexPath returns the base directory where plugin index repository is cloned.
+//
+// e.g. {IndexPath}/plugins/{plugin}.yaml
+func (p Paths) IndexPath() string { return filepath.Join(p.base, "index") }
+
+// BinPath returns the path where plugin executable symbolic links are found.
+// This path should be added to $PATH in client machine.
+//
+// e.g. {BinPath}/kubectl-foo
+func (p Paths) BinPath() string { return filepath.Join(p.base, "bin") }
+
+// DownloadPath returns a temporary directory for downloading plugins. It does
+// not create a new directory on each call.
+func (p Paths) DownloadPath() string { return filepath.Join(p.tmp, "krew-downloads") }
+
+// InstallPath returns the base directory for plugin installations.
+//
+// e.g. {InstallPath}/{plugin-name}
+func (p Paths) InstallPath() string { return filepath.Join(p.base, "store") }
+
+// PluginInstallPath returns the path to install the plugin.
+//
+// e.g. {PluginInstallPath}/{version}/{..files..}
+func (p Paths) PluginInstallPath(plugin string) string {
+	return filepath.Join(p.InstallPath(), plugin)
+}
+
+// PluginVersionInstallPath returns the path to the specified version of specified
+// plugin.
+//
+// e.g. {PluginVersionInstallPath} = {PluginInstallPath}/{version}
+func (p Paths) PluginVersionInstallPath(plugin, version string) string {
+	return filepath.Join(p.InstallPath(), plugin, version)
 }
 
 // GetExecutedVersion returns the currently executed version. If krew is
 // not executed as an plugin it will return a nil error and an empty string.
-// TODO(lbb): Breaks, refactor.
-func GetExecutedVersion(paths KrewPaths, cmdArgs []string) (string, bool, error) {
-	currentBinaryPath, err := filepath.Abs(cmdArgs[0])
+func GetExecutedVersion(installPath string, executionPath string, pathResolver func(string) (string, error)) (string, bool, error) {
+	path, err := pathResolver(executionPath)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to resolve path, err: %v", err)
+	}
+
+	currentBinaryPath, err := filepath.Abs(path)
 	if err != nil {
 		return "", false, err
 	}
 
-	pluginsPath, err := filepath.Abs(filepath.Join(paths.Install, "krew"))
+	pluginsPath, err := filepath.Abs(filepath.Join(installPath, "krew"))
 	if err != nil {
 		return "", false, err
 	}
@@ -96,8 +115,21 @@ func GetExecutedVersion(paths KrewPaths, cmdArgs []string) (string, bool, error)
 	return elems[0], true, nil
 }
 
-// IsPlugin checks if the currently executed binary is a plugin.
-func IsPlugin(environ []string) bool {
-	_, ok := parseEnvs(environ)["KUBECTL_PLUGINS_DESCRIPTOR_NAME"]
-	return ok
+// Realpath evaluates symbolic links. If the path is not a symbolic link, it
+// returns the cleaned path. Symbolic links with relative paths return error.
+func Realpath(path string) (string, error) {
+	s, err := os.Lstat(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to stat the currently executed path (%q), err: %v", path, err)
+	}
+
+	if s.Mode()&os.ModeSymlink != 0 {
+		if path, err = os.Readlink(path); err != nil {
+			return "", fmt.Errorf("failed to resolve the symlink of the currently executed version, err: %v", err)
+		}
+		if !filepath.IsAbs(path) {
+			return "", fmt.Errorf("symbolic link is relative (%s)", path)
+		}
+	}
+	return filepath.Clean(path), nil
 }
